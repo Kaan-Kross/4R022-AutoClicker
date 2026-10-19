@@ -1,0 +1,92 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      onedir:
+        description: "Folder build instead of single file"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    name: Build · ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, label: Windows }
+          - { os: macos-latest,   label: macOS }
+          - { os: ubuntu-22.04,   label: Linux }
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Linux system libraries (Qt + X11)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-xkb1 libdbus-1-3 fonts-dejavu-core
+      - run: pip install -r requirements-dev.txt
+      - name: Build (tests → self-test → PyInstaller → verify → package)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: python Build/build.py --ci ${{ inputs.onedir && '--onedir' || '' }}
+      - name: Build under Xvfb (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python Build/build.py --ci ${{ inputs.onedir && '--onedir' || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 4R022-AutoClicker-${{ matrix.label }}
+          path: |
+            Build/output/*.zip
+            Build/output/*.tar.gz
+            Build/output/SHA256SUMS.txt
+            Build/output/BUILD_REPORT.md
+            Build/output/build-info.json
+            Build/output/selftest-report.txt
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log-${{ matrix.label }}
+          path: Build/output/logs/build.log
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: 4R022-AutoClicker-*
+          merge-multiple: true
+      - name: Combined checksums
+        run: |
+          cd dist
+          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: 4R022 AutoClicker ${{ github.ref_name }}
+          body_path: CHANGELOG.md
+          prerelease: ${{ contains(github.ref_name, 'b') || contains(github.ref_name, 'beta') }}
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
